@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "package": "archives.tater.datapackwiz.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "DatapackCommandInvoker",
+    "ExampleMixin",
+    "RegistryKeyArgumentTypeInvoker"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+	}
+}
