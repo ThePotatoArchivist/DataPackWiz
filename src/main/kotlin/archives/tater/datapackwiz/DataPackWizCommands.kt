@@ -1,11 +1,15 @@
 package archives.tater.datapackwiz
 
 import archives.tater.datapackwiz.lib.*
-import archives.tater.datapackwiz.lib.argument.*
+import archives.tater.datapackwiz.lib.argument.TagArgumentType
+import archives.tater.datapackwiz.lib.argument.getPackContainer
+import archives.tater.datapackwiz.lib.argument.getRegistryKey
+import archives.tater.datapackwiz.lib.argument.orCommandException
 import com.google.gson.JsonParser
 import com.mojang.brigadier.CommandDispatcher
 import com.mojang.brigadier.arguments.StringArgumentType
 import com.mojang.brigadier.exceptions.CommandSyntaxException
+import com.mojang.brigadier.exceptions.DynamicCommandExceptionType
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType
 import com.mojang.brigadier.suggestion.SuggestionProvider
 import com.mojang.serialization.JsonOps
@@ -28,6 +32,7 @@ import net.minecraft.server.command.CommandManager
 import net.minecraft.server.command.ServerCommandSource
 import net.minecraft.text.Text
 import net.minecraft.util.WorldSavePath
+import java.awt.Desktop
 import kotlin.io.path.bufferedReader
 import kotlin.io.path.createDirectory
 import kotlin.io.path.exists
@@ -51,7 +56,11 @@ val TAG_TYPES = listOf(
     TagType("item", "tags/items", RegistryKeys.ITEM, TagArgumentType.ITEM),
 )
 
-fun <T> tagTypeOf(registry: RegistryKey<out Registry<T>>) = TAG_TYPES.find { it.registry == registry }
+val UNSUPPORTED_REGISTRY = DynamicCommandExceptionType { registry ->
+    Text.of("Unsupported registry: $registry")
+}
+
+fun <T> tagTypeOf(registry: RegistryKey<out Registry<T>>) = TAG_TYPES.find { it.registry == registry } ?: throw UNSUPPORTED_REGISTRY.create(registry)
 
 val DATAPACK_SUGGEST = SuggestionProvider<ServerCommandSource> { context, builder ->
     CommandSource.suggestMatching(
@@ -111,7 +120,7 @@ fun CommandDispatcher<ServerCommandSource>.registerDPWizCommands(registryAccess:
                     fun <T : Any> TagType<T>.register() {
                         sub(name) {
                             argumentExec("tag", argumentType.factory(registryAccess)) { context ->
-                                context.source.sendFeedback(Text.of(argumentType.get(context, "tag").toString()), false)
+                                manualEdit(context.source.server, getPackContainer(context, "datapack"), argumentType.get(context, "tag"))
                                 1
                             }
                         }
@@ -156,7 +165,7 @@ fun <T : Any> addTagEntry(server: MinecraftServer, datapack: ResourcePackProfile
     DataOutput(server.getSavePath(WorldSavePath.DATAPACKS).resolve(datapack.name.removePrefix("file/")))
         .getResolver(
             DataOutput.OutputType.DATA_PACK,
-        tagTypeOf(tag.registry)?.dir ?: throw INVALID_REGISTRY_KEY.create(tag.registry)
+            tagTypeOf(tag.registry).dir
         )
         .resolveJson(tag.id)
         .run {
@@ -168,5 +177,20 @@ fun <T : Any> addTagEntry(server: MinecraftServer, datapack: ResourcePackProfile
             val newTagFile = current?.let { TagFile(it.entries + newEntries, it.replace) } ?: TagFile(newEntries, false)
 
             DataProvider.writeToPath(DataWriter.UNCACHED, TagFile.CODEC.encodeStart(JsonOps.INSTANCE, newTagFile).orCommandException(), this)
+        }
+}
+
+fun <T> manualEdit(server: MinecraftServer, datapack: ResourcePackProfile, tag: TagKey<T>) {
+    DataOutput(server.getSavePath(WorldSavePath.DATAPACKS).resolve(datapack.name.removePrefix("file/")))
+        .getResolver(
+            DataOutput.OutputType.DATA_PACK,
+            tagTypeOf(tag.registry).dir
+        )
+        .resolveJson(tag.id)
+        .run {
+            if(!exists())
+                DataProvider.writeToPath(DataWriter.UNCACHED, TagFile.CODEC.encodeStart(JsonOps.INSTANCE, TagFile(listOf(), false)).orCommandException(), this)
+            if (Desktop.isDesktopSupported())
+                Desktop.getDesktop().open(this.toFile())
         }
 }
