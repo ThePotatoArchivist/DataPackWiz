@@ -3,64 +3,47 @@ package archives.tater.datapackwiz
 import archives.tater.datapackwiz.lib.*
 import archives.tater.datapackwiz.lib.argument.TagArgumentType
 import archives.tater.datapackwiz.lib.argument.getPackContainer
-import archives.tater.datapackwiz.lib.argument.getRegistryKey
+import archives.tater.datapackwiz.lib.argument.getRegistryEntry
 import archives.tater.datapackwiz.lib.argument.orCommandException
 import com.google.gson.JsonParser
 import com.mojang.brigadier.CommandDispatcher
 import com.mojang.brigadier.arguments.StringArgumentType
+import com.mojang.brigadier.builder.ArgumentBuilder
+import com.mojang.brigadier.context.CommandContext
 import com.mojang.brigadier.exceptions.CommandSyntaxException
-import com.mojang.brigadier.exceptions.DynamicCommandExceptionType
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType
 import com.mojang.brigadier.suggestion.SuggestionProvider
 import com.mojang.serialization.JsonOps
 import net.minecraft.command.CommandRegistryAccess
 import net.minecraft.command.CommandSource
-import net.minecraft.command.argument.RegistryKeyArgumentType
+import net.minecraft.command.argument.RegistryEntryArgumentType
 import net.minecraft.data.DataOutput
 import net.minecraft.data.DataProvider
 import net.minecraft.data.DataWriter
+import net.minecraft.registry.Registries
 import net.minecraft.registry.Registry
 import net.minecraft.registry.RegistryKey
 import net.minecraft.registry.RegistryKeys
+import net.minecraft.registry.entry.RegistryEntry
 import net.minecraft.registry.tag.TagEntry
 import net.minecraft.registry.tag.TagFile
 import net.minecraft.registry.tag.TagKey
+import net.minecraft.registry.tag.TagManagerLoader
 import net.minecraft.resource.*
 import net.minecraft.resource.metadata.PackResourceMetadata
 import net.minecraft.server.MinecraftServer
 import net.minecraft.server.command.CommandManager
 import net.minecraft.server.command.ServerCommandSource
 import net.minecraft.text.Text
+import net.minecraft.util.Util
 import net.minecraft.util.WorldSavePath
-import java.awt.Desktop
+import java.nio.file.Path
 import kotlin.io.path.bufferedReader
 import kotlin.io.path.createDirectory
 import kotlin.io.path.exists
 import kotlin.jvm.optionals.getOrNull
 
 const val DATAPACK_FORMAT = 15
-
-@JvmRecord
-data class TagType<T: Any>(
-    val name: String,
-    val dir: String,
-    val registry: RegistryKey<Registry<T>>,
-    val argumentType: TagArgumentType.Factory<T>,
-)
-
-val TAG_TYPES = listOf(
-    TagType("block", "tags/blocks", RegistryKeys.BLOCK, TagArgumentType.BLOCK),
-    TagType("entity_type", "tags/entity_types", RegistryKeys.ENTITY_TYPE, TagArgumentType.ENTITY_TYPE),
-    TagType("fluid", "tags/fluids", RegistryKeys.FLUID, TagArgumentType.FLUID),
-    TagType("game_event", "tags/game_events", RegistryKeys.GAME_EVENT, TagArgumentType.GAME_EVENT),
-    TagType("item", "tags/items", RegistryKeys.ITEM, TagArgumentType.ITEM),
-)
-
-val UNSUPPORTED_REGISTRY = DynamicCommandExceptionType { registry ->
-    Text.of("Unsupported registry: $registry")
-}
-
-fun <T> tagTypeOf(registry: RegistryKey<out Registry<T>>) = TAG_TYPES.find { it.registry == registry } ?: throw UNSUPPORTED_REGISTRY.create(registry)
 
 val DATAPACK_SUGGEST = SuggestionProvider<ServerCommandSource> { context, builder ->
     CommandSource.suggestMatching(
@@ -72,7 +55,49 @@ val DATAPACK_SUGGEST = SuggestionProvider<ServerCommandSource> { context, builde
     )
 }
 
+val registryRefs = Registries.REGISTRIES.keys + setOf(
+    RegistryKeys.BIOME,
+    RegistryKeys.MESSAGE_TYPE,
+    RegistryKeys.TRIM_PATTERN,
+    RegistryKeys.TRIM_MATERIAL,
+    RegistryKeys.DIMENSION_TYPE,
+    RegistryKeys.DAMAGE_TYPE,
+) // Sourced from SerializableRegistries
+
+fun ArgumentBuilder<ServerCommandSource, *>.branchRegistries(block: ArgumentBuilder<ServerCommandSource, *>.(registryRef: RegistryKey<out Registry<Nothing>>) -> Unit) {
+    for (registryRef in registryRefs) {
+        sub(registryRef.value.toShortString()) {
+            @Suppress("UNCHECKED_CAST")
+            block(registryRef as RegistryKey<out Registry<Nothing>>) // Unspeakable crimes
+            // no but seriously this generic madness is going to give me a headache
+        }
+    }
+}
+
 fun CommandDispatcher<ServerCommandSource>.registerDPWizCommands(registryAccess: CommandRegistryAccess, environment: CommandManager.RegistrationEnvironment) {
+//    val registryRefs = Registries.REGISTRIES.keys + RegistryLoader.DYNAMIC_REGISTRIES.map { it.key }
+
+    fun <T> ArgumentBuilder<ServerCommandSource, *>.registerTagCommand(registryRef: RegistryKey<out Registry<T>>, execute: (context: CommandContext<ServerCommandSource>, tagKey: TagKey<T>) -> Int) {
+        argumentExec("tag", TagArgumentType(registryRef, registryAccess)) { context ->
+            execute(
+                context,
+                TagArgumentType.getTagKey(context, "tag", registryRef),
+            )
+        }
+    }
+
+    fun <T> ArgumentBuilder<ServerCommandSource, *>.registerTagElementCommand(registryRef: RegistryKey<out Registry<T>>, execute: (context: CommandContext<ServerCommandSource>, tagKey: TagKey<T>, element: RegistryEntry.Reference<T>) -> Int) {
+        argument("tag", TagArgumentType(registryRef, registryAccess)) {
+            argumentExec("element", RegistryEntryArgumentType(registryAccess, registryRef)) { context ->
+                execute(
+                    context,
+                    TagArgumentType.getTagKey(context, "tag", registryRef),
+                    getRegistryEntry(context, "element", registryRef),
+                )
+            }
+        }
+    }
+
     command("datapackwiz") {
         requires { it.hasPermissionLevel(4) }
 
@@ -93,41 +118,30 @@ fun CommandDispatcher<ServerCommandSource>.registerDPWizCommands(registryAccess:
                 argument("datapack", StringArgumentType.string()) {
                     suggests(DATAPACK_SUGGEST)
 
-                    fun <T : Any> TagType<T>.register() { // Needed due to some weird generics
-                        sub(name) {
-                            argument("tag", argumentType.factory(registryAccess)) {
-                                argumentExec("elements", RegistryKeyArgumentType.registryKey(registry)) { context ->
-                                    addTagEntry(
-                                        context.source.server,
-                                        getPackContainer(context, "datapack"),
-                                        argumentType.get(context, "tag"),
-                                        getRegistryKey(context, "elements", registry)
-                                    )
-                                    1
-                                }
-                            }
+                    branchRegistries { registryRef ->
+                        registerTagElementCommand(registryRef) { context, tagKey, element ->
+                            addTagEntry(
+                                context.source.server,
+                                getPackContainer(context, "datapack"),
+                                tagKey,
+                                element.registryKey(),
+                            )
+                            1
                         }
                     }
-
-                    for (type in TAG_TYPES)
-                        type.register()
                 }
             }
 
             sub("edit_manual") {
                 argument("datapack", StringArgumentType.string()) {
                     suggests(DATAPACK_SUGGEST)
-                    fun <T : Any> TagType<T>.register() {
-                        sub(name) {
-                            argumentExec("tag", argumentType.factory(registryAccess)) { context ->
-                                manualEdit(context.source.server, getPackContainer(context, "datapack"), argumentType.get(context, "tag"))
-                                1
-                            }
+
+                    branchRegistries { registryRef ->
+                        registerTagCommand(registryRef) { context, tagKey ->
+                            manualEdit(context.source.server, getPackContainer(context, "datapack"), TagArgumentType.getTagKey(context, "tag", registryRef))
+                            1
                         }
                     }
-
-                    for (type in TAG_TYPES)
-                        type.register()
                 }
             }
         }
@@ -161,36 +175,41 @@ fun createDatapack(server: MinecraftServer, name: String, description: String): 
     return resourcePackProfile
 }
 
-fun <T : Any> addTagEntry(server: MinecraftServer, datapack: ResourcePackProfile, tag: TagKey<T>, vararg entries: RegistryKey<T>) {
+private fun <T : Any> getTagPath(
+    server: MinecraftServer,
+    datapack: ResourcePackProfile,
+    tag: TagKey<T>
+): Path =
     DataOutput(server.getSavePath(WorldSavePath.DATAPACKS).resolve(datapack.name.removePrefix("file/")))
         .getResolver(
             DataOutput.OutputType.DATA_PACK,
-            tagTypeOf(tag.registry).dir
+            TagManagerLoader.getPath(tag.registry),
         )
         .resolveJson(tag.id)
-        .run {
-            val current = if (exists())
-                TagFile.CODEC.decode(JsonOps.INSTANCE, JsonParser.parseReader(bufferedReader())).result().getOrNull()?.first
-            else null
 
-            val newEntries = entries.map { TagEntry.create(it.value) }
-            val newTagFile = current?.let { TagFile(it.entries + newEntries, it.replace) } ?: TagFile(newEntries, false)
+fun addTagEntry(server: MinecraftServer, datapack: ResourcePackProfile, tag: TagKey<*>, vararg entries: RegistryKey<*>) {
+    getTagPath(server, datapack, tag).run {
+        val current = if (exists())
+            TagFile.CODEC.decode(JsonOps.INSTANCE, JsonParser.parseReader(bufferedReader())).result().getOrNull()?.first
+        else null
 
-            DataProvider.writeToPath(DataWriter.UNCACHED, TagFile.CODEC.encodeStart(JsonOps.INSTANCE, newTagFile).orCommandException(), this)
-        }
+        val newEntries = entries.map { TagEntry.create(it.value) }
+        val newTagFile = current?.let { TagFile(it.entries + newEntries, it.replace) } ?: TagFile(newEntries, false)
+
+        DataProvider.writeToPath(DataWriter.UNCACHED, TagFile.CODEC.encodeStart(JsonOps.INSTANCE, newTagFile).orCommandException(), this)
+    }
 }
 
 fun <T> manualEdit(server: MinecraftServer, datapack: ResourcePackProfile, tag: TagKey<T>) {
     DataOutput(server.getSavePath(WorldSavePath.DATAPACKS).resolve(datapack.name.removePrefix("file/")))
         .getResolver(
             DataOutput.OutputType.DATA_PACK,
-            tagTypeOf(tag.registry).dir
+            TagManagerLoader.getPath(tag.registry),
         )
         .resolveJson(tag.id)
         .run {
             if(!exists())
                 DataProvider.writeToPath(DataWriter.UNCACHED, TagFile.CODEC.encodeStart(JsonOps.INSTANCE, TagFile(listOf(), false)).orCommandException(), this)
-            if (Desktop.isDesktopSupported())
-                Desktop.getDesktop().open(this.toFile())
+            Util.getOperatingSystem().open(toFile())
         }
 }

@@ -18,11 +18,11 @@ import net.minecraft.registry.tag.TagKey
 import net.minecraft.util.Identifier
 import java.util.concurrent.CompletableFuture
 
-class TagArgumentType(private val registry: RegistryKey<Registry<Any>>, registryAccess: CommandRegistryAccess) : ArgumentType<TagKey<*>> {
-    private val registryWrapper = registryAccess.createWrapper(registry)
+class TagArgumentType<T>(private val registry: RegistryKey<out Registry<T>>, registryAccess: CommandRegistryAccess) : ArgumentType<TagKey<T>> {
+    private val registryWrapper: RegistryWrapper<T> = registryAccess.createWrapper(registry)
 
     @Throws(CommandSyntaxException::class)
-    override fun parse(stringReader: StringReader): TagKey<*>? =
+    override fun parse(stringReader: StringReader): TagKey<T>? =
         TagKey.of(registry, Identifier.fromCommandInput(stringReader))
 
     override fun <S> listSuggestions(
@@ -33,40 +33,43 @@ class TagArgumentType(private val registry: RegistryKey<Registry<Any>>, registry
 
 //    override fun getExamples(): Collection<String> = EXAMPLES
 
-    class Serializer : ArgumentSerializer<TagArgumentType, Serializer.Properties> {
-        override fun writePacket(properties: Properties, buf: PacketByteBuf) {
-            buf.writeRegistryKey(properties.registry);
+    private fun getProperties() = Properties(registry)
+
+    companion object Serializer : ArgumentSerializer<TagArgumentType<*>, Properties<*>> {
+
+        private val ROOT_KEY: RegistryKey<Registry<Registry<Any>>> = RegistryKey.ofRegistry(Identifier("root"))
+
+        fun getTagKey(context: CommandContext<*>, name: String): TagKey<*> = context.getArgument(name, TagKey::class.java)
+
+        @Suppress("UNCHECKED_CAST")
+        fun <T> getTagKey(context: CommandContext<*>, name: String, registryRef: RegistryKey<out Registry<T>>): TagKey<T> = getTagKey(context, name).also {
+            assert(it.registry == registryRef) { "TagKeyArgument $name expected registry ${registryRef.value} but got ${it.registry.value}" }
+        } as TagKey<T>
+
+        override fun writePacket(properties: Properties<*>, buf: PacketByteBuf) {
+            buf.writeRegistryKey(properties.registry)
         }
 
-        override fun fromPacket(buf: PacketByteBuf): Properties =
+        override fun fromPacket(buf: PacketByteBuf): Properties<*> =
             Properties(buf.readRegistryKey(ROOT_KEY))
 
-        override fun getArgumentTypeProperties(argumentType: TagArgumentType): Properties =
-            Properties(argumentType.registry)
+        override fun getArgumentTypeProperties(argumentType: TagArgumentType<*>): Properties<*> =
+            argumentType.getProperties()
 
-        override fun writeJson(properties: Properties, json: JsonObject) {
+        override fun writeJson(properties: Properties<*>, json: JsonObject) {
             json["registry"] = properties.registry.value.toString()
         }
-
-        companion object {
-            val ROOT_KEY: RegistryKey<Registry<Registry<Any>>> = RegistryKey.ofRegistry(Identifier("root"))
-        }
-
-        inner class Properties(
-            val registry: RegistryKey<Registry<Any>> // wip
-        ) : ArgumentTypeProperties<TagArgumentType> {
-            override fun createType(commandRegistryAccess: CommandRegistryAccess): TagArgumentType =
-                TagArgumentType(registry, commandRegistryAccess)
-
-            override fun getSerializer(): ArgumentSerializer<TagArgumentType, Properties> {
-                return this@Serializer
-            }
-
-        }
-
     }
 
-    companion object {
-//        private val EXAMPLES = listOf("minecraft:item minecraft:sticks", "minecraft:block c:glass_blocks", "minecraft:enchantment minecraft:riptide")
+    @JvmRecord
+    data class Properties<T>(
+        val registry: RegistryKey<out Registry<T>>
+    ) : ArgumentTypeProperties<TagArgumentType<*>> {
+        override fun createType(commandRegistryAccess: CommandRegistryAccess): TagArgumentType<*> =
+            TagArgumentType(registry, commandRegistryAccess)
+
+        override fun getSerializer(): ArgumentSerializer<TagArgumentType<*>, Properties<*>> {
+            return Serializer
+        }
     }
 }
