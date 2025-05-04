@@ -18,24 +18,31 @@ import net.minecraft.registry.tag.TagKey
 import net.minecraft.util.Identifier
 import java.util.concurrent.CompletableFuture
 
-class TagArgumentType<T>(private val registry: RegistryKey<out Registry<T>>, registryAccess: CommandRegistryAccess) : ArgumentType<TagKey<T>> {
+class TagArgumentType<T>(registryAccess: CommandRegistryAccess, private val registry: RegistryKey<out Registry<T>>) : ArgumentType<TagKey<T>> {
     private val registryWrapper: RegistryWrapper<T> = registryAccess.createWrapper(registry)
 
     @Throws(CommandSyntaxException::class)
-    override fun parse(stringReader: StringReader): TagKey<T>? =
-        TagKey.of(registry, Identifier.fromCommandInput(stringReader))
+    override fun parse(stringReader: StringReader): TagKey<T> {
+        stringReader.expect('#')
+        return TagKey.of(registry, Identifier.fromCommandInput(stringReader))
+    }
 
     override fun <S> listSuggestions(
         context: CommandContext<S>,
         builder: SuggestionsBuilder
     ): CompletableFuture<Suggestions> =
-        CommandSource.suggestIdentifiers(registryWrapper.streamTagKeys().map { it.id }, builder)
+        CommandSource.suggestIdentifiers(registryWrapper.streamTagKeys().map { it.id }, builder, "#")
 
-//    override fun getExamples(): Collection<String> = EXAMPLES
+    override fun getExamples(): Collection<String> = EXAMPLES
 
     private fun getProperties() = Properties(registry)
 
     companion object Serializer : ArgumentSerializer<TagArgumentType<*>, Properties<*>> {
+        val EXAMPLES = listOf(
+            "#minecraft:stone_tool_materials",
+            "#c:cows",
+            "#create:upright_on_belt"
+        )
 
         private val ROOT_KEY: RegistryKey<Registry<Registry<Any>>> = RegistryKey.ofRegistry(Identifier("root"))
 
@@ -54,7 +61,7 @@ class TagArgumentType<T>(private val registry: RegistryKey<out Registry<T>>, reg
             Properties(buf.readRegistryKey(ROOT_KEY))
 
         override fun getArgumentTypeProperties(argumentType: TagArgumentType<*>): Properties<*> =
-            argumentType.getProperties()
+            argumentType.getProperties() // Delegated to member function due ot generics weirdness
 
         override fun writeJson(properties: Properties<*>, json: JsonObject) {
             json["registry"] = properties.registry.value.toString()
@@ -66,7 +73,7 @@ class TagArgumentType<T>(private val registry: RegistryKey<out Registry<T>>, reg
         val registry: RegistryKey<out Registry<T>>
     ) : ArgumentTypeProperties<TagArgumentType<*>> {
         override fun createType(commandRegistryAccess: CommandRegistryAccess): TagArgumentType<*> =
-            TagArgumentType(registry, commandRegistryAccess)
+            TagArgumentType(commandRegistryAccess, registry)
 
         override fun getSerializer(): ArgumentSerializer<TagArgumentType<*>, Properties<*>> {
             return Serializer

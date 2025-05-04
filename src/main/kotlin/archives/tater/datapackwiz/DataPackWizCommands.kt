@@ -7,6 +7,7 @@ import archives.tater.datapackwiz.lib.argument.getRegistryEntry
 import archives.tater.datapackwiz.lib.argument.orCommandException
 import com.google.gson.JsonParser
 import com.mojang.brigadier.CommandDispatcher
+import com.mojang.brigadier.arguments.BoolArgumentType
 import com.mojang.brigadier.arguments.StringArgumentType
 import com.mojang.brigadier.builder.ArgumentBuilder
 import com.mojang.brigadier.context.CommandContext
@@ -24,7 +25,6 @@ import net.minecraft.registry.Registries
 import net.minecraft.registry.Registry
 import net.minecraft.registry.RegistryKey
 import net.minecraft.registry.RegistryKeys
-import net.minecraft.registry.entry.RegistryEntry
 import net.minecraft.registry.tag.TagEntry
 import net.minecraft.registry.tag.TagFile
 import net.minecraft.registry.tag.TagKey
@@ -42,7 +42,6 @@ import java.util.concurrent.CompletableFuture
 import kotlin.io.path.bufferedReader
 import kotlin.io.path.createDirectory
 import kotlin.io.path.exists
-import kotlin.jvm.optionals.getOrNull
 
 const val DATAPACK_FORMAT = 15
 
@@ -79,7 +78,7 @@ fun CommandDispatcher<ServerCommandSource>.registerDPWizCommands(registryAccess:
 //    val registryRefs = Registries.REGISTRIES.keys + RegistryLoader.DYNAMIC_REGISTRIES.map { it.key }
 
     fun <T> ArgumentBuilder<ServerCommandSource, *>.registerTagCommand(registryRef: RegistryKey<out Registry<T>>, execute: (context: CommandContext<ServerCommandSource>, tagKey: TagKey<T>) -> Int) {
-        argumentExec("tag", TagArgumentType(registryRef, registryAccess)) { context ->
+        argumentExec("tag", TagArgumentType(registryAccess, registryRef)) { context ->
             execute(
                 context,
                 TagArgumentType.getTagKey(context, "tag", registryRef),
@@ -87,14 +86,49 @@ fun CommandDispatcher<ServerCommandSource>.registerDPWizCommands(registryAccess:
         }
     }
 
-    fun <T> ArgumentBuilder<ServerCommandSource, *>.registerTagElementCommand(registryRef: RegistryKey<out Registry<T>>, execute: (context: CommandContext<ServerCommandSource>, tagKey: TagKey<T>, element: RegistryEntry.Reference<T>) -> Int) {
-        argument("tag", TagArgumentType(registryRef, registryAccess)) {
-            argumentExec("element", RegistryEntryArgumentType(registryAccess, registryRef)) { context ->
-                execute(
-                    context,
-                    TagArgumentType.getTagKey(context, "tag", registryRef),
-                    getRegistryEntry(context, "element", registryRef),
-                )
+    fun <T> ArgumentBuilder<ServerCommandSource, *>.registerTagElementCommand(registryRef: RegistryKey<out Registry<T>>, allowOptional: Boolean = false, execute: (context: CommandContext<ServerCommandSource>, tagKey: TagKey<T>, element: TagEntry) -> Int) {
+        argument("tag", TagArgumentType(registryAccess, registryRef)) {
+            argument("entry", RegistryEntryArgumentType(registryAccess, registryRef)) {
+                if (allowOptional)
+                    argumentExec("optional", BoolArgumentType.bool()) { context ->
+                        execute(
+                            context,
+                            TagArgumentType.getTagKey(context, "tag", registryRef),
+                            if (BoolArgumentType.getBool(context, "optional"))
+                                TagEntry.createOptional(getRegistryEntry(context, "entry", registryRef).registryKey().value)
+                            else
+                                TagEntry.create(getRegistryEntry(context, "entry", registryRef).registryKey().value)
+                        )
+                    }
+
+                executes { context ->
+                    execute(
+                        context,
+                        TagArgumentType.getTagKey(context, "tag", registryRef),
+                        TagEntry.create(getRegistryEntry(context, "element", registryRef).registryKey().value),
+                    )
+                }
+            }
+            argument("tag_entry", TagArgumentType(registryAccess, registryRef)) {
+                if (allowOptional)
+                    argumentExec("optional", BoolArgumentType.bool()) { context ->
+                        execute(
+                            context,
+                            TagArgumentType.getTagKey(context, "tag", registryRef),
+                            if (BoolArgumentType.getBool(context, "optional"))
+                                TagEntry.createOptionalTag(TagArgumentType.getTagKey(context, "tag_entry", registryRef).id)
+                            else
+                                TagEntry.createTag(TagArgumentType.getTagKey(context, "tag_entry", registryRef).id)
+                        )
+                    }
+
+                executes { context ->
+                    execute(
+                        context,
+                        TagArgumentType.getTagKey(context, "tag", registryRef),
+                        TagEntry.createTag(TagArgumentType.getTagKey(context, "tag_entry", registryRef).id),
+                    )
+                }
             }
         }
     }
@@ -122,12 +156,30 @@ fun CommandDispatcher<ServerCommandSource>.registerDPWizCommands(registryAccess:
                     suggests(DATAPACK_SUGGEST)
 
                     branchRegistries { registryRef ->
-                        registerTagElementCommand(registryRef) { context, tagKey, element ->
+                        registerTagElementCommand(registryRef, allowOptional = true) { context, tagKey, element ->
                             addTagEntry(
                                 context.source.server,
                                 getPackContainer(context, "datapack"),
                                 tagKey,
-                                element.registryKey(),
+                                element,
+                            )
+                            1
+                        }
+                    }
+                }
+            }
+
+            sub ("remove") {
+                argument("datapack", StringArgumentType.string()) {
+                    suggests(DATAPACK_SUGGEST)
+
+                    branchRegistries { registryRef ->
+                        registerTagElementCommand(registryRef) { context, tagKey, element ->
+                            removeTagEntry(
+                                context.source.server,
+                                getPackContainer(context, "datapack"),
+                                tagKey,
+                                element,
                             )
                             1
                         }
@@ -158,11 +210,10 @@ fun createDatapack(server: MinecraftServer, name: String, description: String): 
 
     return DataProvider.writeToPath(
         DataWriter.UNCACHED,
-        JsonObject (
+        JsonObject(
             "pack" to PackResourceMetadata.SERIALIZER.toJson(metadata)
         ),
-        datapacksPath.createDirectory()
-            .resolve(ResourcePack.PACK_METADATA_NAME)
+        datapacksPath.createDirectory().resolve(ResourcePack.PACK_METADATA_NAME)
     ).thenApply {
         ResourcePackProfile.create(
             "file/$name",
@@ -188,17 +239,30 @@ private fun <T : Any> getTagPath(
         )
         .resolveJson(tag.id)
 
-fun addTagEntry(server: MinecraftServer, datapack: ResourcePackProfile, tag: TagKey<*>, vararg entries: RegistryKey<*>) {
+fun addTagEntry(server: MinecraftServer, datapack: ResourcePackProfile, tag: TagKey<*>, entry: TagEntry) {
     getTagPath(server, datapack, tag).run {
         val current = if (exists())
-            TagFile.CODEC.decode(JsonOps.INSTANCE, JsonParser.parseReader(bufferedReader())).result().getOrNull()?.first
+            TagFile.CODEC.decode(JsonOps.INSTANCE, JsonParser.parseReader(bufferedReader())).orCommandException().first
         else null
 
-        val newEntries = entries.map { TagEntry.create(it.value) }
-        val newTagFile = current?.let { TagFile(it.entries + newEntries, it.replace) } ?: TagFile(newEntries, false)
+        val newTagFile = current?.let { TagFile(it.entries.filterNot { it equals entry } + entry, it.replace) } ?: TagFile(listOf(entry), false)
 
         DataProvider.writeToPath(DataWriter.UNCACHED, TagFile.CODEC.encodeStart(JsonOps.INSTANCE, newTagFile).orCommandException(), this)
     }
+}
+
+fun removeTagEntry(server: MinecraftServer, datapack: ResourcePackProfile, tag: TagKey<*>, entry: TagEntry): Boolean {
+    getTagPath(server, datapack, tag).run {
+        if (!exists()) return false
+
+        val current = TagFile.CODEC.decode(JsonOps.INSTANCE, JsonParser.parseReader(bufferedReader())).orCommandException().first
+
+        val newTagFile = TagFile(current.entries.filterNot { it equals entry }, current.replace)
+
+        DataProvider.writeToPath(DataWriter.UNCACHED, TagFile.CODEC.encodeStart(JsonOps.INSTANCE, newTagFile).orCommandException(), this)
+    }
+
+    return true
 }
 
 fun <T> manualEdit(server: MinecraftServer, datapack: ResourcePackProfile, tag: TagKey<T>) {

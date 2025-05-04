@@ -3,7 +3,8 @@
   "package": "archives.tater.datapackwiz.mixin",
   "compatibilityLevel": "JAVA_17",
   "mixins": [
-    "DatapackCommandInvoker"
+    "DatapackCommandInvoker",
+    "TagEntryAccessor"
   ],
   "injectors": {
     "defaultRequire": 1
