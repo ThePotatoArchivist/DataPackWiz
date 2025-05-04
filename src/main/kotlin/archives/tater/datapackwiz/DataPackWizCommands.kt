@@ -38,6 +38,7 @@ import net.minecraft.text.Text
 import net.minecraft.util.Util
 import net.minecraft.util.WorldSavePath
 import java.nio.file.Path
+import java.util.concurrent.CompletableFuture
 import kotlin.io.path.bufferedReader
 import kotlin.io.path.createDirectory
 import kotlin.io.path.exists
@@ -106,8 +107,10 @@ fun CommandDispatcher<ServerCommandSource>.registerDPWizCommands(registryAccess:
                 argumentExec("description", StringArgumentType.string()) { context ->
                     val name = StringArgumentType.getString(context, "name")
                     val description = StringArgumentType.getString(context, "description")
-                    val packProfile = createDatapack(context.source.server, name, description) ?: throw CommandSyntaxException(SimpleCommandExceptionType { "Failed" }) { "Failed" }
-                    context.source.sendFeedback(Text.literal("Created datapack ").append(packProfile.getInformationText(false)), true)
+                    createDatapack(context.source.server, name, description).thenAccept {
+                        it ?: throw CommandSyntaxException(SimpleCommandExceptionType { "Failed" }) { "Failed" }
+                        context.source.sendFeedback(Text.literal("Created datapack ").append(it.getInformationText(false)), true)
+                    }
                     1
                 }
             }
@@ -148,31 +151,29 @@ fun CommandDispatcher<ServerCommandSource>.registerDPWizCommands(registryAccess:
     }
 }
 
-fun createDatapack(server: MinecraftServer, name: String, description: String): ResourcePackProfile? {
+fun createDatapack(server: MinecraftServer, name: String, description: String): CompletableFuture<ResourcePackProfile?> {
     val metadata = PackResourceMetadata(Text.of(description), DATAPACK_FORMAT)
 
     val datapacksPath = server.getSavePath(WorldSavePath.DATAPACKS).resolve(name)
 
-    DataProvider.writeToPath(
+    return DataProvider.writeToPath(
         DataWriter.UNCACHED,
         JsonObject (
             "pack" to PackResourceMetadata.SERIALIZER.toJson(metadata)
         ),
         datapacksPath.createDirectory()
             .resolve(ResourcePack.PACK_METADATA_NAME)
-    )
-
-    val resourcePackProfile = ResourcePackProfile.create(
-        "file/$name",
-        Text.literal(name),
-        false,
-        FileResourcePackProvider.getFactory(datapacksPath, false),
-        ResourceType.SERVER_DATA,
-        ResourcePackProfile.InsertionPosition.TOP,
-        ResourcePackSource.WORLD
-    )
-
-    return resourcePackProfile
+    ).thenApply {
+        ResourcePackProfile.create(
+            "file/$name",
+            Text.literal(name),
+            false,
+            FileResourcePackProvider.getFactory(datapacksPath, false),
+            ResourceType.SERVER_DATA,
+            ResourcePackProfile.InsertionPosition.TOP,
+            ResourcePackSource.WORLD
+        )
+    }
 }
 
 private fun <T : Any> getTagPath(

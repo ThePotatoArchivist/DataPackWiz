@@ -29,7 +29,7 @@ class TagArgumentType<T>(private val registry: RegistryKey<out Registry<T>>, reg
         context: CommandContext<S>,
         builder: SuggestionsBuilder
     ): CompletableFuture<Suggestions> =
-        CommandSource.suggestMatching(registryWrapper.streamTagKeys().map { it.id.toString() }, builder)
+        CommandSource.suggestIdentifiers(registryWrapper.streamTagKeys().map { it.id }, builder)
 
 //    override fun getExamples(): Collection<String> = EXAMPLES
 
